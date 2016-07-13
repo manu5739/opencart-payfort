@@ -7,30 +7,41 @@ class ControllerPaymentPayfortFort extends Controller {
     //private $_gatewaySandboxHost = 'https://checkout.fortstg.com/';
     public function index() {
         $this->language->load('payment/payfort_fort');
-        $this->data['button_confirm'] = $this->language->get('button_confirm');
-        $this->data['text_general_error']  = $this->language->get('text_general_error');
-        $this->data['text_error_card_decline'] = $this->language->get('text_error_card_decline');
+        $data['button_confirm'] = $this->language->get('button_confirm');
+        $data['text_general_error']  = $this->language->get('text_general_error');
+        $data['text_error_card_decline'] = $this->language->get('text_error_card_decline');
+        //$data['text_yes'] = $this->language->get('text_yes');
+        //$data['text_no'] = $this->language->get('text_no');
+        //$data['text_save_credit_card_note'] = $this->language->get('text_save_credit_card_note');
         
-        $this->data['payfort_fort_cc_integration_type'] = $this->config->get('payfort_fort_cc_integration_type');
+        //$this->load->model('setting/setting');
+        $data['payfort_fort_cc_integration_type'] = $this->config->get('payfort_fort_cc_integration_type');
         
-        $this->data['merchant_page_data'] = '';
+        $data['merchant_page_data'] = '';
         if($this->config->get('payfort_fort_cc_integration_type') == 'merchantPage') {
             $order_id = $this->session->data['order_id'];
             $this->db->query("UPDATE `" . DB_PREFIX . "order` SET payment_method = 'Credit / Debit Card', date_modified = NOW() WHERE order_id = '" . (int)$order_id . "'");
-            $this->data['merchant_page_data'] = $this->getMerchantPageData();
+            $data['merchant_page_data'] = $this->getMerchantPageData();
             //$this->model_checkout_order->addOrderHistory($order_id, 1, 'Pending Payment', false);
         }
         
-        if (file_exists(DIR_TEMPLATE . $this->config->get('config_template') . '/template/payment/payfort_fort.tpl')) {
-            $this->template = $this->config->get('config_template') . '/template/payment/payfort_fort.tpl';
+        if (file_exists(DIR_TEMPLATE . $this->config->get('config_template') . '/payment/payfort_fort.tpl')) {
+            $this->template = $this->config->get('config_template') . '/payment/payfort_fort.tpl';
         } else {
-            $this->template = 'default/template/payment/payfort_fort.tpl';
+            $this->template = 'payment/payfort_fort.tpl';
         }
-        $this->render();
+        return $this->load->view($this->template, $data);
+
     }
     
     public function response(){
-        $fortParams = array_merge($_GET,$_POST); // never include PUT and other restful actions
+        $fortParams = array_merge($_GET,$_POST); //never use $_REQUEST, it might include PUT .. etc
+        
+        if ($this->config->get('payfort_fort_debug')) {
+            $log = new Log('payfort_fort.log');
+            $log->write(print_r($fortParams, 1));
+        }
+        
         if (isset($fortParams['response_code']) && isset($fortParams['merchant_reference'])){
             $this->language->load('payment/payfort_fort');
             $this->load->model('checkout/order');
@@ -38,7 +49,6 @@ class ControllerPaymentPayfortFort extends Controller {
             $order_info = $this->model_checkout_order->getOrder($order_id);
             $success = false;
             $params = $fortParams;
-            $hashString = '';
             $signature = $fortParams['signature'];
             
             unset($params['signature']);
@@ -61,43 +71,40 @@ class ControllerPaymentPayfortFort extends Controller {
                 }
                 else{
                     $success = true;
-                    $this->model_checkout_order->confirm($order_id, $this->config->get('config_order_status_id'));
-                    $this->model_checkout_order->update($order_id, $this->config->get('payfort_fort_order_status_id'), 'Paid: ' . $order_id, false);
+                    $this->model_checkout_order->addOrderHistory($order_id, $this->config->get('payfort_fort_order_status_id'), 'Paid: ' . $order_id, false);
                     if($this->config->get('payfort_fort_cc_integration_type') == 'merchantPage') {
                         echo '<script>window.top.location.href = "'.$this->url->link('payment/payfort_fort/success').'"</script>';
                         exit;
                     }
-                    else{
+                    else {
                         header('location:'.$this->url->link('payment/payfort_fort/success'));
                     }
-                    
                 }
             }
             
             if (!$success){
                 //$this->model_checkout_order->confirm($order_id, 10, 'Payment Error', false);
+                $this->model_checkout_order->addOrderHistory($order_id, 10, 'Payment Failed', false);
                 $this->session->data['error'] = $this->language->get('text_payment_failed').$params['response_message'];
-                $this->model_checkout_order->update($order_id, 10, 'Payment Failed', false);
                 if($this->config->get('payfort_fort_cc_integration_type') == 'merchantPage') {
                     echo '<script>window.top.location.href = "'.$this->url->link('checkout/checkout').'"</script>';
                     exit;
                 }
-                else{
-                    header('location:'.$this->url->link('payment/payfort_fort/error'));
-                }
+                else {
+                    header('location:'.$this->url->link('checkout/checkout'));
+                }                
             }
-            
         }
     }
-
+    
     public function send() {
 
         $this->load->model('checkout/order');
         $order_id = $this->session->data['order_id'];
         $order_info = $this->model_checkout_order->getOrder($this->session->data['order_id']);
-
+        
         $postData = array(
-            'amount'                => round($order_info['total'] * $order_info['currency_value'],2) * 100,
+            'amount'                => $this->_convertFortAmount($order_info['total'], $order_info['currency_value'], $order_info['currency_code']),
             'currency'              => strtoupper($order_info['currency_code']),
             'merchant_identifier'   => $this->config->get('payfort_fort_entry_merchant_identifier'),
             'access_code'           => $this->config->get('payfort_fort_entry_access_code'),
@@ -105,11 +112,13 @@ class ControllerPaymentPayfortFort extends Controller {
             'customer_email'        => $order_info['email'],
             'command'               => $this->config->get('payfort_fort_entry_command'),
             'language'              => $this->config->get('payfort_fort_entry_language'),
-            'return_url'            => $this->url->link('payment/payfort_fort/response', '', 'SSL'),
+            'return_url'            => $this->_getUrl('payment/payfort_fort/response'),
         );
         
-        $this->db->query("UPDATE `" . DB_PREFIX . "order` SET payment_method = 'Credit / Debit Card', date_modified = NOW() WHERE order_id = '" . (int)$order_id . "'");
 
+        $this->db->query("UPDATE `" . DB_PREFIX . "order` SET payment_method = 'Credit / Debit Card', date_modified = NOW() WHERE order_id = '" . (int)$order_id . "'");
+        
+        
         //calculate request signature
         $signature = $this->_calculateSignature($postData, 'request');
         $postData['signature'] = $signature;
@@ -133,7 +142,7 @@ class ControllerPaymentPayfortFort extends Controller {
         
         $json['form'] = $form;
         
-        //$this->model_checkout_order->confirm($order_id, 1, 'Pending Payment', false);
+        //$this->model_checkout_order->addOrderHistory($order_id, 1, 'Pending Payment', false);
 
         $this->response->setOutput(json_encode($json));
 
@@ -191,7 +200,6 @@ class ControllerPaymentPayfortFort extends Controller {
                     else {
                         $params = $host2HostParams;
                         $signature = $host2HostParams['signature'];
-
                         unset($params['signature']);
                         unset($params['route']);
                         $trueSignature = $this->_calculateSignature($params, 'response');
@@ -217,9 +225,7 @@ class ControllerPaymentPayfortFort extends Controller {
                                 }
                                 if($success) {
                                     $success = true;
-                                    $this->model_checkout_order->confirm($order_id, $this->config->get('config_order_status_id'));
-                                    $this->model_checkout_order->update($order_id, $this->config->get('payfort_fort_order_status_id'), 'Paid: ' . $order_id, false);
-                                    //$this->model_checkout_order->confirm($order_id, $this->config->get('payfort_fort_order_status_id'), 'Paid: ' . $order_id, false);
+                                    $this->model_checkout_order->addOrderHistory($order_id, $this->config->get('payfort_fort_order_status_id'), 'Paid: ' . $order_id, false);
                                     echo '<script>window.top.location.href = "'.$this->url->link('payment/payfort_fort/success').'"</script>';
                                     exit;
                                 }
@@ -230,8 +236,8 @@ class ControllerPaymentPayfortFort extends Controller {
             }
             
             if (!$success){
-                $this->model_checkout_order->confirm($order_id, 10, 'Payment Failed', false);
-                //$this->model_checkout_order->update($order_id, 10, 'Payment Failed', false);
+                //$this->model_checkout_order->confirm($order_id, 10, 'Payment Error', false);
+                $this->model_checkout_order->addOrderHistory($order_id, 10, 'Payment Failed', false);
                 $this->session->data['error'] = $this->language->get('text_payment_failed').$params['response_message'];
                 echo '<script>window.top.location.href = "'.$this->url->link('checkout/checkout').'"</script>';
                 exit;
@@ -258,7 +264,7 @@ class ControllerPaymentPayfortFort extends Controller {
             'customer_name'         => trim($order_info['payment_firstname'].' '.$order_info['payment_lastname']),
             'token_name'            => $fortParams['token_name'],
             'language'              => $this->config->get('payfort_fort_entry_language'),
-            'return_url'            => $this->url->link('payment/payfort_fort/response', '', 'SSL'),
+            'return_url'            => $this->_getUrl('payment/payfort_fort/response'),
         );
         //calculate request signature
         $signature = $this->_calculateSignature($postData, 'request');
@@ -336,7 +342,7 @@ class ControllerPaymentPayfortFort extends Controller {
                 'merchant_reference'    => $order_id,
                 'service_command'       => 'TOKENIZATION',
                 'language'              => $this->config->get('payfort_fort_entry_language'),
-                'return_url'            => $this->url->link('payment/payfort_fort/merchantPageResponse', '', 'SSL'),
+                'return_url'            => $this->_getUrl('payment/payfort_fort/merchantPageResponse'),
             );
 
             //calculate request signature
@@ -357,18 +363,39 @@ class ControllerPaymentPayfortFort extends Controller {
     public function merchantPageCancel() {
         $this->language->load('payment/payfort_fort');
         $this->load->model('checkout/order');
-        $order_id = $this->session->data['order_id'];
+        //$order_id = $this->session->data['order_id'];
         //$order_info = $this->model_checkout_order->getOrder($order_id);
         //$this->model_checkout_order->addOrderHistory($order_id, 7, 'Payment Canceled', false);
-        //$this->model_checkout_order->confirm($order_id, 7, 'Payment Canceled', false);
-        //$this->model_checkout_order->update($order_id, 7, 'Payment Canceled', false);
         $this->session->data['error'] = $this->language->get('text_payment_canceled');
         header('location:'.$this->url->link('checkout/checkout'));
     }
     
-    public function success() { 	
+    public function success() {
+		$this->load->language('checkout/success');
+		$this->load->language('payment/payfort_fort');
+
 		if (isset($this->session->data['order_id'])) {
 			$this->cart->clear();
+
+			// Add to activity log
+			$this->load->model('account/activity');
+
+			if ($this->customer->isLogged()) {
+				$activity_data = array(
+					'customer_id' => $this->customer->getId(),
+					'name'        => $this->customer->getFirstName() . ' ' . $this->customer->getLastName(),
+					'order_id'    => $this->session->data['order_id']
+				);
+
+				$this->model_account_activity->addActivity('order_account', $activity_data);
+			} else {
+				$activity_data = array(
+					'name'     => $this->session->data['guest']['firstname'] . ' ' . $this->session->data['guest']['lastname'],
+					'order_id' => $this->session->data['order_id']
+				);
+
+				$this->model_account_activity->addActivity('order_guest', $activity_data);
+			}
 
 			unset($this->session->data['shipping_method']);
 			unset($this->session->data['shipping_methods']);
@@ -376,198 +403,130 @@ class ControllerPaymentPayfortFort extends Controller {
 			unset($this->session->data['payment_methods']);
 			unset($this->session->data['guest']);
 			unset($this->session->data['comment']);
-			unset($this->session->data['order_id']);	
+			unset($this->session->data['order_id']);
 			unset($this->session->data['coupon']);
 			unset($this->session->data['reward']);
 			unset($this->session->data['voucher']);
 			unset($this->session->data['vouchers']);
-		}	
-									   
-        $this->language->load('payment/payfort_fort');
-		$this->language->load('checkout/success');
-		
-		$this->document->setTitle($this->language->get('heading_success_title'));
-		
-		$this->data['breadcrumbs'] = array(); 
-
-      	$this->data['breadcrumbs'][] = array(
-        	'href'      => $this->url->link('common/home'),
-        	'text'      => $this->language->get('text_home'),
-        	'separator' => false
-      	); 
-		
-      	$this->data['breadcrumbs'][] = array(
-        	'href'      => $this->url->link('checkout/cart'),
-        	'text'      => $this->language->get('text_basket'),
-        	'separator' => $this->language->get('text_separator')
-      	);
-				
-		$this->data['breadcrumbs'][] = array(
-			'href'      => $this->url->link('checkout/checkout', '', 'SSL'),
-			'text'      => $this->language->get('text_checkout'),
-			'separator' => $this->language->get('text_separator')
-		);	
-					
-      	$this->data['breadcrumbs'][] = array(
-        	'href'      => $this->url->link('payment/payfort_fort/success'),
-        	'text'      => $this->language->get('text_p_success'),
-        	'separator' => $this->language->get('text_separator')
-      	);
-
-		$this->data['heading_title'] = $this->language->get('heading_success_title');
-		
-		if ($this->customer->isLogged()) {
-    		$this->data['text_message'] = sprintf($this->language->get('text_success_customer'), $this->url->link('account/account', '', 'SSL'), $this->url->link('account/order', '', 'SSL'), $this->url->link('account/download', '', 'SSL'), $this->url->link('information/contact'));
-		} else {
-    		$this->data['text_message'] = sprintf($this->language->get('text_success_guest'), $this->url->link('information/contact'));
+			unset($this->session->data['totals']);
 		}
-		
-    	$this->data['button_continue'] = $this->language->get('button_continue');
 
-    	$this->data['continue'] = $this->url->link('common/home');
+		$this->document->setTitle($this->language->get('heading_title'));
 
-		if (file_exists(DIR_TEMPLATE . $this->config->get('config_template') . '/template/common/success.tpl')) {
-			$this->template = $this->config->get('config_template') . '/template/common/success.tpl';
-		} else {
-			$this->template = 'default/template/common/success.tpl';
-		}
-		
-		$this->children = array(
-			'common/column_left',
-			'common/column_right',
-			'common/content_top',
-			'common/content_bottom',
-			'common/footer',
-			'common/header'			
+		$data['breadcrumbs'] = array();
+
+		$data['breadcrumbs'][] = array(
+			'text' => $this->language->get('text_home'),
+			'href' => $this->url->link('common/home')
 		);
-				
-		$this->response->setOutput($this->render());
-  	}
-    
-    public function error() { 	
-			   
-		$this->language->load('payment/payfort_fort');
-		$this->language->load('checkout/success');
-		
-		$this->document->setTitle($this->language->get('heading_failed_title'));
-		
-		$this->data['breadcrumbs'] = array(); 
 
-      	$this->data['breadcrumbs'][] = array(
-        	'href'      => $this->url->link('common/home'),
-        	'text'      => $this->language->get('text_home'),
-        	'separator' => false
-      	); 
-		
-      	$this->data['breadcrumbs'][] = array(
-        	'href'      => $this->url->link('checkout/cart'),
-        	'text'      => $this->language->get('text_basket'),
-        	'separator' => $this->language->get('text_separator')
-      	);
-				
-		$this->data['breadcrumbs'][] = array(
-			'href'      => $this->url->link('checkout/checkout', '', 'SSL'),
-			'text'      => $this->language->get('text_checkout'),
-			'separator' => $this->language->get('text_separator')
-		);	
-					
-      	$this->data['breadcrumbs'][] = array(
-        	'href'      => $this->url->link('payment/payfort_fort/error'),
-        	'text'      => $this->language->get('text_failed'),
-        	'separator' => $this->language->get('text_separator')
-      	);
-
-		$this->data['heading_title'] = $this->language->get('heading_failed_title');
-		
-		if ($this->customer->isLogged()) {
-    		$this->data['text_message'] = sprintf($this->language->get('text_failed_customer'), $this->url->link('account/account', '', 'SSL'), $this->url->link('account/order', '', 'SSL'), $this->url->link('account/download', '', 'SSL'), $this->url->link('information/contact'));
-		} else {
-    		$this->data['text_message'] = sprintf($this->language->get('text_failed_guest'), $this->url->link('information/contact'));
-		}
-		
-    	$this->data['button_continue'] = $this->language->get('button_continue');
-
-    	$this->data['continue'] = $this->url->link('common/home');
-
-		if (file_exists(DIR_TEMPLATE . $this->config->get('config_template') . '/template/common/success.tpl')) {
-			$this->template = $this->config->get('config_template') . '/template/common/success.tpl';
-		} else {
-			$this->template = 'default/template/common/success.tpl';
-		}
-		
-		$this->children = array(
-			'common/column_left',
-			'common/column_right',
-			'common/content_top',
-			'common/content_bottom',
-			'common/footer',
-			'common/header'			
+		$data['breadcrumbs'][] = array(
+			'text' => $this->language->get('text_basket'),
+			'href' => $this->url->link('checkout/cart')
 		);
-				
-		$this->response->setOutput($this->render());
-    }
+
+		$data['breadcrumbs'][] = array(
+			'text' => $this->language->get('text_checkout'),
+			'href' => $this->url->link('checkout/checkout', '', 'SSL')
+		);
+
+		$data['breadcrumbs'][] = array(
+			'text' => $this->language->get('text_p_success'),
+			'href' => $this->url->link('checkout/success')
+		);
+
+		$data['heading_title'] = $this->language->get('heading_success_title');
+
+		if ($this->customer->isLogged()) {
+			$data['text_message'] = sprintf($this->language->get('text_success_customer'), $this->url->link('account/account', '', 'SSL'), $this->url->link('account/order', '', 'SSL'), $this->url->link('account/download', '', 'SSL'), $this->url->link('information/contact'));
+		} else {
+			$data['text_message'] = sprintf($this->language->get('text_success_guest'), $this->url->link('information/contact'));
+		}
+
+		$data['button_continue'] = $this->language->get('button_continue');
+
+		$data['continue'] = $this->url->link('common/home');
+
+		$data['column_left'] = $this->load->controller('common/column_left');
+		$data['column_right'] = $this->load->controller('common/column_right');
+		$data['content_top'] = $this->load->controller('common/content_top');
+		$data['content_bottom'] = $this->load->controller('common/content_bottom');
+		$data['footer'] = $this->load->controller('common/footer');
+		$data['header'] = $this->load->controller('common/header');
+
+		if (file_exists(DIR_TEMPLATE . $this->config->get('config_template') . '/common/success.tpl')) {
+			$this->response->setOutput($this->load->view($this->config->get('config_template') . '/common/success.tpl', $data));
+		} else {
+			$this->response->setOutput($this->load->view('common/success.tpl', $data));
+		}
+	}
     
-    /**
-     * calculate fort signature
-     * @param array $arr_data
-     * @param sting $sign_type request or response
-     * @return string fort signature
-     */
-    private function _calculateSignature($arr_data, $sign_type = 'request') {
+        /**
+         * calculate fort signature
+         * @param array $arr_data
+         * @param sting $sign_type request or response
+         * @return string fort signature
+         */
+        private function _calculateSignature($arr_data, $sign_type = 'request') {
 
-        $shaString = '';
+            $shaString = '';
 
-        ksort($arr_data);
-        foreach ($arr_data as $k=>$v){
-            $shaString .= "$k=$v";
+            ksort($arr_data);
+            foreach ($arr_data as $k=>$v){
+                $shaString .= "$k=$v";
+            }
+
+            if($sign_type == 'request') {
+                $shaString = $this->config->get('payfort_fort_entry_request_sha_phrase') . $shaString . $this->config->get('payfort_fort_entry_request_sha_phrase');
+            }
+            else{
+                $shaString = $this->config->get('payfort_fort_entry_response_sha_phrase') . $shaString . $this->config->get('payfort_fort_entry_response_sha_phrase');
+            }
+            $signature = hash($this->config->get('payfort_fort_entry_hash_algorithm') ,$shaString);
+
+            return $signature;
         }
-
-        if($sign_type == 'request') {
-            $shaString = $this->config->get('payfort_fort_entry_request_sha_phrase') . $shaString . $this->config->get('payfort_fort_entry_request_sha_phrase');
+        
+        /**
+         * Convert Amount with dicemal points
+         * @param decimal $amount
+         * @param decimal $currency_value
+         * @param string  $currency_code
+         * @return decimal
+         */
+        private function _convertFortAmount($amount, $currency_value, $currency_code) {
+            $new_amount = 0;
+            //$decimal_points = $this->currency->getDecimalPlace();
+            $decimal_points = $this->getCurrencyDecimalPoints($currency_code);
+            $new_amount = round($amount * $currency_value, $decimal_points) * (pow(10, $decimal_points));
+            return $new_amount;
         }
-        else{
-            $shaString = $this->config->get('payfort_fort_entry_response_sha_phrase') . $shaString . $this->config->get('payfort_fort_entry_response_sha_phrase');
+        
+        private function _getUrl($path) {
+            $url = $this->url->link($path, '', 'SSL');
+            return $url;
         }
-        $signature = hash($this->config->get('payfort_fort_entry_hash_algorithm') ,$shaString);
-
-        return $signature;
-    }
-
-    /**
-     * Convert Amount with dicemal points
-     * @param decimal $amount
-     * @param decimal $currency_value
-     * @param string  $currency_code
-     * @return decimal
-     */
-    private function _convertFortAmount($amount, $currency_value, $currency_code) {
-        $new_amount = 0;
-        //$decimal_points = $this->currency->getDecimalPlace();
-        $decimal_points = $this->getCurrencyDecimalPoints($currency_code);
-        $new_amount = round($amount * $currency_value, $decimal_points) * (pow(10, $decimal_points));
-        return $new_amount;
-    }
-    
-    /**
-     * 
-     * @param string $currency
-     * @param integer 
-     */
-    private function getCurrencyDecimalPoints($currency) {
-        $decimalPoint  = 2;
-        $arrCurrencies = array(
-            'JOD' => 3,
-            'KWD' => 3,
-            'OMR' => 3,
-            'TND' => 3,
-            'BHD' => 3,
-            'LYD' => 3,
-            'IQD' => 3,
-        );
-        if (isset($arrCurrencies[$currency])) {
-            $decimalPoint = $arrCurrencies[$currency];
+        
+        /**
+         * 
+         * @param string $currency
+         * @param integer 
+         */
+        private function getCurrencyDecimalPoints($currency) {
+            $decimalPoint  = 2;
+            $arrCurrencies = array(
+                'JOD' => 3,
+                'KWD' => 3,
+                'OMR' => 3,
+                'TND' => 3,
+                'BHD' => 3,
+                'LYD' => 3,
+                'IQD' => 3,
+            );
+            if (isset($arrCurrencies[$currency])) {
+                $decimalPoint = $arrCurrencies[$currency];
+            }
+            return $decimalPoint;
         }
-        return $decimalPoint;
-    }
 }
 
